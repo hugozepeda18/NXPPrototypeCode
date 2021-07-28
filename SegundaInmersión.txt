@@ -1,0 +1,6 @@
+Para la semana de inmersión:
+	+Un mensaje en la bocina!
+	+El CAN funcionando de una manera simple
+	+Puerta abriendo con botón en APP, también ventana. 
+	//No TOUCH!
+	

@@ -1,0 +1,17 @@
+DAC0808
+
+Memoria de mensajes
+1. Grabar el mensaje
+	*formato WAV 
+	*Morfófino (no stereo) 
+	*8 bits 
+	*frecuencia de muestreo 8Khz o 4kHz (mejor 4kHz,necesito menos espacio por mensaje)
+2. Matlab
+	Usar una función y=wavread("nombredelarchivo.wab")-Y es un arreglo
+3. Grabar Y que viene de Matlab en la Memoria(I^2C) (24LC64AA, muy lenta)
+4. K1 tomo la terminal SCL y SDA, con resistencias de 1K a 5V a la memoria. 
+5. Código IIC 
+	Prueba: Poner patrón de datos fijos, ejemplo, diente de sierra. 
+	Ya que funciona la prueba, ahora sí, enviamos la parte real. Recordar que si estoy
+	a 8Khz=125us y 4Khz=250us.
+

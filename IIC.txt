@@ -1,0 +1,201 @@
+#include "S32K144.h"
+int n = 0;
+int i;
+int z;
+int j;
+int Electrodo;
+int a;
+unsigned short MPR=0x5A;
+
+void delay_I2C (int b)
+{
+	unsigned long a;
+	for(a=0;a<b; a++);
+}
+void SIRC_init_8MHz(void)
+{
+    // Slow IRC Control Status Register
+    SCG->SIRCCSR &= ~ (1<<24);
+    // [24] LK = 0 Control Status Register can be written.
+
+    SCG->SIRCCSR |= 0x01;
+    // [0] SIRCEN = 1 Slow IRC is enabled
+
+    // Slow IRC Divide Register
+    SCG->SIRCDIV |= 0x0101;
+    // [10-8] SIRCDIV2 0b001 Divide by 1 (8MHz)
+    // [2-0]  SIRCDIV1 0b001 Divide by 1 (8MHz)
+
+    while((SCG->SIRCCSR & (1 << 24)) == 0); // wait until clock is valid
+    // [24] SIRCVLD = 1 Slow IRC is enabled and output clock is valid
+}
+void LPI2C_init(void)
+{
+	//PCC -> PCCn[PCC_LPI2C0_INDEX] &=~ (1<<30);
+	PCC->PCCn[PCC_LPI2C0_INDEX] |= (2<<24) | (1<<30);   	/* Enable clock for LPI2C0 y sirc */
+
+	PCC->PCCn[PCC_PORTE_INDEX] |= 1<<30;
+	PORTE->PCR[1]=(3<<8) + 3;
+
+	LPI2C0->MCR = (0);
+	//LPI2C0 -> MSR = 0x00000000;
+	LPI2C0->MCCR0 |= (0x0B<<0) | (0x05<<8) | (0x04<<16) | (0x02<<24);
+	LPI2C0->MCFGR0=3;
+	LPI2C0->MCFGR1 |= (1<<10);//|(2<<24);
+	LPI2C0->MCFGR2 |= 0x000000FF;
+	//LPI2C0->MCFGR3 |= 0x00000800;
+	LPI2C0->MCR |= (1<<9) | (1<<8) | (1<<3) | (1<<0);
+
+	LPI2C0 -> SCR |= (1<<0);
+}
+void PORT_init(void)
+{
+	PORTE -> PCR[4] |= (1<<8) + (10<<16);
+	S32_NVIC -> ISER[1] |= (1<<(63%32));
+
+	PCC->PCCn[PCC_PORTA_INDEX]|=(1<<30);/* Enable PORTA*/
+    PORTA->PCR[2]|= PORT_PCR_MUX(3);      /* Port A2: MUX = ALT3, LPI2C_SDA */
+    PORTA->PCR[3]|= PORT_PCR_MUX(3);      /* Port A3: MUX = ALT3, LPI2C_SCL */
+
+    PCC -> PCCn[PCC_PORTD_INDEX]|=(1<<30);
+    PORTD -> PCR[16] |= 1<<8;
+    PORTD -> PCR[0] |= (1<<8);
+    PORTD -> PCR[15] |= (1<<8);
+    PTD -> PDDR |= (1<<16);
+    PTD -> PDDR |= (1<<0);
+    PTD -> PDDR |= (1<<15);
+    PTD -> PSOR = (1<<0);
+    PTD -> PSOR = (1<<15);
+   	PTD -> PSOR = (1<<16);
+}
+
+void MPR_INIT(void){
+	LPI2C_Transmit(MPR, 0x5E, 0);	//CONFIGURACIÓN DE ELECTRODOS (STOP MODE)
+	LPI2C_Transmit(MPR, 0x2B, 1);	//CONTROL DE FILTRO CUANDO ES MAYOR AL BASELINE
+	LPI2C_Transmit(MPR, 0x2C, 1);
+	delay_I2C(100);
+	LPI2C_Transmit(MPR, 0x2D, 0);
+	LPI2C_Transmit(MPR, 0x2E, 0);
+	LPI2C_Transmit(MPR, 0x2F, 1);
+	delay_I2C(100);
+	LPI2C_Transmit(MPR, 0x30, 1);
+	LPI2C_Transmit(MPR, 0x31, 0xFF);
+	LPI2C_Transmit(MPR, 0x32, 2);
+	delay_I2C(100);
+	for (j=0; j<26; j++)
+	{
+		if (j%2==0)
+		{
+			LPI2C_Transmit(MPR, (0x41 + j), 0x0);
+			//delay(100);
+		}
+		else
+		{
+			LPI2C_Transmit(MPR, (0x41+j), 0x0);
+			//delay(100);
+		}
+	}
+	delay_I2C(100);
+	//LPI2C_Transmit(0x5A, 0x5B, 51);
+	LPI2C_Transmit(MPR, 0x5D, 4);
+	LPI2C_Transmit(MPR, 0x5E, 4);	//CONFIGURACIÓN DE ELECTRODOS (RUN MODE) 9 electrodos son 1010
+	//unsigned int j=0;
+
+	//Configuración de esta madre
+/*	for (unsigned int j=0; j<=256; j++)
+	{
+		LPI2C_Transmit(0x5A, j, 15);
+	}*/
+    /*delay();
+    LPI2C_Transmit(0x5B, 0x5D, 0b100100);
+    delay();*/
+}
+
+void LPI2C_Transmit (int Esclavo, int Direccion, int Data)
+{
+	// Start bit
+	LPI2C0 -> MTDR = ((0x04<<8)|((Esclavo<<1)|0));
+	// 2 bytes de dirección
+	LPI2C0 -> MTDR = (0b000<<8)|Direccion;
+	// byte de data
+	LPI2C0 -> MTDR = (0b000<<8)|Data;
+	delay_I2C(500);
+	//Genera un stop
+	LPI2C0 -> MTDR = (0b10<<8);
+}
+
+int LPI2C_Recieve1 (int Esclavo, int Direccion)
+{
+	int Dato;
+	// Start bit y control byte
+	LPI2C0 -> MTDR = ((0x04<<8)|(Esclavo<<1)|0);
+	//Direccion
+	LPI2C0 -> MTDR = (0b000<<8)|Direccion;
+	delay_I2C(100);
+	//Manda Start
+	LPI2C0 -> MTDR = ((0x04<<8)|((Esclavo<<1)|1));
+	//Recibe el dato
+	LPI2C0 -> MTDR = ((0x01<<8) + 1);
+	delay_I2C(100);
+
+	Dato = (LPI2C0->MRDR & 0x000000FF);
+	//Dato = LPI2C0->MRDR;
+	//LPI2C0 -> MTDR = (0x04<<8);
+	// Manda Stop
+	LPI2C0 -> MTDR = (0b010<<8);
+	/*PCC->PCCn[PCC_LPI2C0_INDEX] &=~ (1<<30);
+	PCC->PCCn[PCC_LPI2C0_INDEX] |= ((2<<24) | (1<<30));*/
+	//EnviarCaracterUART(Dato);
+	return Dato;
+}
+
+void PORTE_IRQHandler(void)
+{
+	//int y;
+    PORTE -> PCR[4] |= (1<<24);
+    for (i = 0; i < 3; i++)
+    {
+    	//y = 0;
+    //ElectrodoSubida = 0;
+    Electrodo = LPI2C_Recieve1(MPR, 0x0);
+	LPI2C_Transmit(MPR, 0x5E, 0);	//CONFIGURACIÓN DE ELECTRODOS (STOP MODE)
+	LPI2C_Transmit(MPR, 0x5E, 4);	//CONFIGURACIÓN DE ELECTRODOS (RUN MODE)
+    }
+
+    //PTD -> PTOR = (1<<16);
+	if (Electrodo == 0)
+	{
+		PTD -> PSOR = (1<<16);
+		PTD -> PSOR = (1<<15);
+		PTD -> PSOR = (1<<0);
+	}
+	if ((Electrodo & (1<<0)) == (1<<0))
+	{
+		PTD -> PCOR = (1<<16);
+		PTD -> PSOR = (1<<15);
+		PTD -> PSOR = (1<<0);
+	}
+	if ((Electrodo & (1<<1)) == (1<<1))
+	{
+		PTD -> PCOR = (1<<15);
+		PTD -> PSOR = (1<<16);
+		PTD -> PSOR = (1<<0);
+	}
+	if ((Electrodo & (1<<2)) == (1<<2))
+	{
+		PTD -> PCOR = (1<<0);
+		PTD -> PSOR = (1<<16);
+		PTD -> PSOR = (1<<15);
+	}
+}
+
+int main(void)
+{
+	SIRC_init_8MHz();      /* Initializ	e system oscillator for 8 MHz xtal */
+	LPI2C_init();          /* Initializes LPI2C ignoring NACK*/
+	PORT_init();
+	MPR_INIT();
+    for(;;)
+    {
+    }
+}

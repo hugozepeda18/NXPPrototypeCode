@@ -1,0 +1,467 @@
+/*
+ * main implementation: use this 'C' sample to create your own application
+ *
+ */
+#include "S32K144.h" /* include peripheral declarations S32K144 */
+unsigned long int TxData1=0x00000001;
+unsigned long int TxData2=0x00000002;
+unsigned long int TxData3=0x00000003;
+unsigned long int TxData4=0x00000004;
+
+unsigned char choose;
+int i=0;
+int j=0;
+int count=0;
+int global=0;
+int color=0;
+
+int m[]={1,1,1};
+
+unsigned int sensor;
+unsigned short ADC=0;
+unsigned short average;
+
+void CLOCK_SOSEnable(void)
+{
+	//CLOCK CONFIG
+	SCG->SOSCDIV=0x00000101;   			//SOSCDIV1 & SOSCDIV2 =1: divide by 1
+	SCG->SOSCCFG=0x00000024;  			//Range=2: Medium freq (SOSC betw 1MHz-8MHz)
+			                            //HGO=0:   Config xtal osc for low power
+										//EREFS=1: Input is external XTAL
+	while(SCG->SOSCCSR & (1<<23)); 		/* Ensure SOSCCSR unlocked */
+	SCG->SOSCCSR=0x00000001;
+	while(!(SCG->SOSCCSR & (1<<24)));
+}
+
+void TIMER(void)
+{
+	SCG->FIRCCSR=1;
+	SCG->FIRCCFG=0;
+	SCG->FIRCDIV|=(2<<8)+(1<<1);
+}
+
+void PORT_Enable(void)
+{
+	PCC->PCCn[PCC_PORTA_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTB_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTC_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTD_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTE_INDEX]|=(1<<30);
+}
+
+void INTERRUPT(void)
+{
+	S32_NVIC->ISER[0]|=(1<<(31%32));//UART0
+	S32_NVIC->ISER[1]|=(1<<(59%32));//PORTA
+	S32_NVIC->ISER[1]|=(1<<(62%32));//PORTD
+	//S32_NVIC->ISPR[15]=(1<<4); //PRIORIDADES PUERTO B
+}
+
+void CAN0_Init(void)
+{
+	PORTE->PCR[4]|= 5<<8; 				// Port E4: MUX = ALT5, CAN0_RX
+	PORTE->PCR[5]|= 5<<8; 				//PORT E5 MUX 5 ES EL CAN tx
+	unsigned short i;
+	#define BUFFER_SIZE 4
+	i=0;
+	PCC->PCCn[PCC_FlexCAN0_INDEX] |= 1<<30;
+
+	//SE DESHABILITA EL CAN PARA CAMBIAR EL CLOCK SOURCE
+	CAN0->MCR|=(1<<31); 				//DESHABILITAMOS EL CAN PARA CAMBIAR CLK
+	CAN0->CTRL1 &=~(1<<13);				//PONEMOS EL CLKSRC (CLOCK) PARA EL SOSDIV
+	CAN0->MCR&=~(1<<31); 				//HABILITAMOS DE NUEVO EL CAN
+
+	//CONFIGURAMOS EL TIME QUANTA
+	while (!((CAN0->MCR & (1<<24)) >> 24))  {}		//CHECAMOS QUE ESTE EN FREEZE MODE
+	CAN0->CTRL1|=(3<<19)+(3<<16)+(6<<0)+(3<<22);	//CONFIGURAMOS PARA 500KHz BIT TIME
+		  	  	  	  	  	  	  	  	  	  	  	// TIME QUANTO =16 POR 8MHz/500KHz=16
+		  	  	  	  	  	  	  	  	  	  		// PESG1 Y 2 SON 3 PORQUE VAN DEL 25%DEL TIME QUANTA-1
+		  	  	  	  	  	  	  	  	  	  		//RWJ=3 AUN NO SE PORQUE BIEN
+		  	  	  	  	  	  	  	  	  	  		//SMP=1 NO SE PONE NADA EN EL BIT}
+	//CLEREAMOS NUESTROS BUFFERS
+	for(i=0;i<128;i++){
+		CAN0->RAMn[i]=0; 				// TENEMOS 128 BYTES PARA ESCRIBIR 4 BYTES DE MENSAGE*32 BUFFERS=128
+	}
+	 CAN0->MCR = 0x0000001F;       		// INICIALIZAMOS LOS BUFFERS
+
+	 	 	 	 	 	 	 	 	 	// Good practice: wait for FRZACK to clear (not in freeze mode)
+	 while ((CAN0->MCR && (1<<24)) >> 24)  {}
+	 	 	 	 	 	 	 	 	 	// Good practice: wait for NOTRDY to clear (module ready)
+	 while ((CAN0->MCR && (1<<27)) >> 27)  {}
+}
+
+void CAN0_Transfer(unsigned long int TxData)
+{
+	CAN0->IFLAG1|=1<<4;
+	CAN0->RAMn[0*BUFFER_SIZE+2]=TxData; 						//MANDAMOS UN BIT DE INFO
+	CAN0->RAMn[0*BUFFER_SIZE+1]=(0x1FF<<18); 					//MANDAMOS EL ID QUE ACEPTA EL OTRO NODO
+	CAN0->RAMn[0*BUFFER_SIZE + 0] = (1<<22)|(12<<24)|(4<<16);	//MANDAMOS EL CODIGO TX, CON UN SRR Y DLC DE 1 BYTE
+}
+
+void PORT_Init_PuenteH(void)
+{
+	PORTB->PCR[8]=(1<<8);			//  GPIO-Out  PH-Motor-1-Clockwise - Up
+	PORTB->PCR[9]=(1<<8); 	         //  GPIO-Out  PH-Motor-1-Counterclockwise - Down
+	PORTB->PCR[10]=(1<<8);			//  GPIO-Out  PH-Motor-2-Clockwise - Down
+	PORTB->PCR[11]=(1<<8);			//  GPIO-Out  PH-Motor-2-Counterclockwise - Up
+
+	PTB->PDDR|=(1<<8)+(1<<9)+(1<<10)+(1<<11); //Outputs
+	PTB->PCOR|=(1<<8)+(1<<9)+(1<<10)+(1<<11);
+
+	PORTD->PCR[13]=(1<<8)+(9<<16); 	//FinCarrera Door-Up
+	PORTD->PCR[14]=(1<<8)+(9<<16); 	//Lock-signal / FinCarrera Door-Down
+	PORTD->PCR[0]=(1<<8)+(9<<16);	//FinCarrera Window-Down
+	PORTD->PCR[16]=(1<<8)+(9<<16); 	//FinCarrera Window-Up
+}
+
+void PORT_Init_Panel(void)
+{
+	PORTD->PCR[2]=(1<<8)+(9<<16); 	//Going Down
+	PORTD->PCR[9]=(1<<8)+(9<<16); 	//Closing Door
+	PORTD->PCR[8]=(1<<8)+(9<<16); 	//Going Down Next Door
+
+	PORTD->PCR[5]=(1<<8)+(9<<16); 	//Going Up
+	PORTD->PCR[11]=(1<<8)+(9<<16); 	//Opening Door
+	PORTD->PCR[12]=(1<<8)+(9<<16); 	//Going Up Next Door
+}
+
+void PORT_Init_Window(void)
+{
+	PORTE->PCR[8]=(1<<8);         	//GPIO Polarized
+	PTE->PDDR|=(1<<8); 				//Output Polarized
+}
+
+void Velocity_Window(void)
+{
+	//Turn on FTM0
+	PCC->PCCn[PCC_FTM0_INDEX]&=~1<<30;
+	PCC->PCCn[PCC_FTM0_INDEX]|=3<<24;
+	PCC->PCCn[PCC_FTM0_INDEX]|=1<<30;
+
+	//FTM0 Configuration
+	FTM0->MODE|=1<<2;
+	FTM0->SC|=(1<<23)+(3<<0); 	//CLOCK 6 MHz
+
+	FTM0->MOD=6000-1;			//6000 tics
+
+	//COMPARADORES, SON  NECESARIOS
+	FTM0->CONTROLS[7].CnSC = 0X00000028;
+			               // MSB:MSA (chan Mode Select)= 0b01, Output Compare
+			               // ELSB:ELSA (chan Edge or Level Select)= 0b01, toggle
+	// FTM0 ch 3 Compare Value
+	FTM0->CONTROLS[7].CnV=4500;
+
+	//FTM0->CONTROLS[1].CnSC = 0x00000007;
+	FTM0->SC|=3<<3;
+
+	//FTM3 Channel 7
+	PORTE->PCR[7]|=(2<<8);
+}
+
+void PORT_Init_Seguro(void)
+{
+	PORTD->PCR[15]=(1<<8);
+	PTD->PDDR|=(1<<15);
+	PTD->PCOR|=(1<<15);
+}
+
+void PORT_Init_Stereo(void)
+{
+	PORTC->PCR[12]=(1<<8);
+	PTC->PDDR|=(1<<12);
+}
+
+void UART0_Init(void)
+{
+	PCC->PCCn[PCC_LPUART0_INDEX]&=~(1<<30);
+	PCC->PCCn[PCC_LPUART0_INDEX]|=(3<<24);
+	PCC->PCCn[PCC_LPUART0_INDEX]|=(1<<30); 	//UART with FIRC-48MHz
+	LPUART0->BAUD=156;
+	LPUART0->CTRL|=(1<<18)+(1<<21);					//Enable Rx + Interrupt
+	//Enable Port B UART0
+	PORTB->PCR[0]|=(2<<8);           			// Port B0: MUX = ALT2,UART0 RX
+	PORTB->PCR[1]|=(2<<8);
+}
+
+void LED_Init(void)
+{
+	PCC->PCCn[PCC_FTM2_INDEX]&=~(1<<30); //APAGAMOS PARA PONER EL FIRCDIV2
+	PCC->PCCn[PCC_FTM2_INDEX]|=3<<24;
+	PCC->PCCn[PCC_FTM2_INDEX]|=1<<30;
+
+	FTM2->SC=(1<<17);
+	FTM2->MOD=30-1;//cuenta 10 tics
+
+	FTM2->CONTROLS[1].CnSC=0X00000028; /* FTM0 ch0: Output Compare, toggle output on match */
+	FTM2->CONTROLS[1].CnV=0;     		 /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/		  //FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle
+
+	//LEDS FTM
+	PORTA->PCR[0]|=(2<<8)+(10<<16);
+}
+
+void RESET(void)
+{
+	FTM2->MODE|=1<<2; //QUITAMOS LA PROTECCION DE WRITE
+	FTM2->SC=(1<<17);
+	FTM2->CONTROLS[1].CnV=0;    /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/
+	FTM2->SC|=3<<3;
+}
+
+void TURN_ON(void)
+{
+	FTM2->MODE|=1<<2; //QUITAMOS LA PROTECCION DE WRITE
+	FTM2->SC=(1<<17);
+	FTM2->CONTROLS[1].CnV=23;    /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/
+	FTM2->SC|=3<<3;
+}
+
+void TURN_OFF(void)
+{
+	FTM2->MODE|=1<<2; //QUITAMOS LA PROTECCION DE WRITE
+	FTM2->SC=(1<<17);
+	FTM2->CONTROLS[1].CnV=6;     //Amarillo    /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/
+	FTM2->SC|=3<<3;
+}
+
+void PORTA_IRQHandler(void)
+{
+	count++;
+	PORTA->PCR[0]|=1<<24;
+}
+
+void delay(void)
+{
+	for(i=0;i<100000;i++){}
+}
+
+void LIGHT(void)
+{
+	count=0;
+	RESET();
+	delay();
+	TURN_ON();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(m[j]==0)
+			{
+				TURN_OFF();
+			}
+			else
+			{
+				TURN_ON();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	RESET();
+}
+
+void LIGHT2(void)
+{
+	count=0;
+	delay();
+	TURN_OFF();
+	do{}while(count!=1200);	//50*24
+	RESET();
+}
+
+void LPTMR0_Init(void)
+{
+	PCC->PCCn[PCC_LPTMR0_INDEX]|=(1<<30);
+	LPTMR0->PSR=(1<<2)+1;
+	LPTMR0->CSR=(1<<6)+1;
+}
+
+void ADC0_init(void)
+{
+	PCC->PCCn[PCC_ADC0_INDEX]&=~(1<<30);
+	PCC->PCCn[PCC_ADC0_INDEX]|=(3<<24);
+	PCC->PCCn[PCC_ADC0_INDEX]|=(1<<30);
+	ADC0->SC1[0]=(1<<6);
+	ADC0->CFG1=(1<<2);
+}
+
+void LPTMR0_IRQHandler(void)
+{
+	LPTMR0->CSR|=(1<<7);	//APAGAR BANDERA
+	S32_NVIC->ISER[1]|=(1<<(39%32));//ADC0
+	ADC0->SC1[0]|=9;        // CANAL DE CONVERSIÓN SE9 -> PTC1
+}
+
+void ADC0_IRQHandler(void)
+{
+	sensor = (((ADC0->R[0])*5000)/0xFFF);	//RESOLUCIÓN MÁXIMA 12 BITS
+	average += sensor;				//PROMEDIO DE MUESTREO
+	ADC++;
+	if (ADC == 2)						//SE HACE UN PROMEDIO DE 3 VALORES PARA ELIMINAR RUIDO
+	{
+		sensor = average/2;
+		ADC = 0;			//RESET DE CONTADOR
+		average = 0;			//RESET DE PROMEDIO
+		if (sensor >= 3000)
+		{
+			PTB->PCOR=(1<<11);
+			PTB->PDOR|=(1<<10);
+			S32_NVIC->ISER[1]&=~(1<<(58%32));
+		}
+	}
+}
+
+void PORTD_IRQHandler(void)
+{
+	if ((PORTD->PCR[13]&(1<<24))==(1<<24))
+	{
+	    PORTD->PCR[13]|=1<<24;
+	    PTB->PCOR|=(1<<8);
+	    PTD->PCOR|=(1<<15);
+	    color=2;
+	}
+	else if ((PORTD->PCR[14]&(1<<24))==(1<<24))
+	{
+	    PORTD->PCR[14]|=1<<24;
+	    color=2;
+	    PTB->PCOR|=(1<<9);
+	}
+	else if ((PORTD->PCR[0]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[0]|=1<<24;
+		PTB->PCOR|=(1<<10);
+	}
+	else if ((PORTD->PCR[16]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[16]|=1<<24;
+		PTB->PCOR|=(1<<11);
+	}
+	else if ((PORTD->PCR[2]&(1<<24))==(1<<24))
+	{
+	    PORTD->PCR[2]|=1<<24;
+	    PTB->PDOR|=(1<<10);
+	}
+	else if ((PORTD->PCR[9]&(1<<24))==(1<<24))
+	{
+	    PORTD->PCR[9]|=1<<24;
+	    PTB->PDOR|=(1<<9);
+	    color=1;
+	    CAN0_Transfer(TxData2);
+	}
+	else if ((PORTD->PCR[8]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[8]|=1<<24;
+		CAN0_Transfer(TxData3);
+	}
+	else if ((PORTD->PCR[5]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[5]|=1<<24;
+		PTB->PDOR|=(1<<11);
+		//Enable anti-pinch!!!
+		/*LPTMR0->CMR=20-1;		//REFERENCIA 20 ms
+		S32_NVIC->ISER[1]|=(1<<(58%32));*/
+	}
+	else if ((PORTD->PCR[11]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[11]|=1<<24;
+		PTD->PDOR|=(1<<15);
+		PTB->PDOR|=(1<<8);
+		color=1;
+		CAN0_Transfer(TxData1);
+	}
+	else if ((PORTD->PCR[12]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[12]|=1<<24;
+		CAN0_Transfer(TxData4);
+	}
+}
+
+void LPUART0_RxTx_IRQHandler(void)
+{
+	choose = LPUART0->DATA;
+	if(choose=='A') //Open Door
+	{
+		PTD->PDOR|=(1<<15);
+		PTB->PDOR|=(1<<8);
+		color=1;
+		CAN0_Transfer(TxData1);
+	}
+	if(choose=='B') //Close Door
+	{
+		PTB->PDOR|=(1<<9);
+		color=1;
+		CAN0_Transfer(TxData2);
+	}
+	if(choose=='C') //Open Window
+	{
+		PTB->PSOR|=(1<<10);
+	}
+	if(choose=='D')	//Close Window
+	{
+		PTB->PSOR|=(1<<11);
+		//Enable anti-pinch!!!
+		LPTMR0->CMR=20-1;		//REFERENCIA 20 ms
+		S32_NVIC->ISER[1]|=(1<<(58%32));
+	}
+	if(choose=='E')
+	{
+		//Modo demo
+		PTD->PDOR|=(1<<15);
+		PTB->PDOR|=(1<<8);
+		PTC->PDOR=(1<<12);
+		color=1;
+	}
+	if(choose=='F')
+	{
+		PTE->PTOR=(1<<8); //Polarized
+	}
+	//CAN
+	if(choose=='G')
+	{
+		CAN0_Transfer(TxData1);
+	}
+	if(choose=='H')
+	{
+		CAN0_Transfer(TxData2);
+	}
+	if(choose=='I')
+	{
+		CAN0_Transfer(TxData3);
+	}
+	if(choose=='J')
+	{
+		CAN0_Transfer(TxData4);
+	}
+}
+
+int main(void)
+{
+	CLOCK_SOSEnable();
+	TIMER();
+	PORT_Enable();
+	INTERRUPT();
+	CAN0_Init();
+	PORT_Init_PuenteH();
+	PORT_Init_Panel();
+	PORT_Init_Window();
+	Velocity_Window();
+	PORT_Init_Seguro();
+	PORT_Init_Stereo();
+	UART0_Init();
+	LED_Init();
+	LPTMR0_Init();
+	ADC0_init();
+	for(;;)
+	{
+		if(color==1)
+		{
+			LIGHT();
+			color=0;
+		}
+		else if(color==2)
+		{
+			LIGHT2();
+			color=0;
+		}
+	}
+	return 0;
+}

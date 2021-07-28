@@ -1,0 +1,552 @@
+/*
+ * main implementation: use this 'C' sample to create your own application
+ *
+ */
+
+#include "S32K144.h" /* include peripheral declarations S32K144 */
+unsigned long int TxData[]={0x00000001,0x00000002,0x00000003,0x00000004};
+unsigned long int TxData1[]={0x00000005,0x00000006,0x00000007,0x00000008}; //Usado para el CAN del examen
+
+/*Global Variables */
+uint8_t data_tx[10];
+uint8_t data_rx[10];
+uint8_t data;
+
+void CLOCKS(void)
+{
+	//CLOCK CONFIG
+	SCG->SOSCDIV=0x00000101;   			//SOSCDIV1 & SOSCDIV2 =1: divide by 1
+	SCG->SOSCCFG=0x00000024;  			//Range=2: Medium freq (SOSC betw 1MHz-8MHz)
+			                            //HGO=0:   Config xtal osc for low power
+										//EREFS=1: Input is external XTAL
+	while(SCG->SOSCCSR & (1<<23)); /* Ensure SOSCCSR unlocked */
+	SCG->SOSCCSR=0x00000001;
+	while(!(SCG->SOSCCSR & (1<<24)));
+}
+
+void PORT_init(void)
+{
+	PCC->PCCn[PCC_PORTA_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTB_INDEX]|=(1<<30);			// Enable clock for UART0
+	PCC->PCCn[PCC_PORTC_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTD_INDEX]|=(1<<30);
+	PCC->PCCn[PCC_PORTE_INDEX]|=(1<<30);
+}
+
+void CAN0_init(void)
+{
+	PORTE->PCR[4] |= 5<<8; 				// Port E4: MUX = ALT5, CAN0_RX
+	PORTE->PCR[5] |= 5<<8; 				//PORT E5 MUX 5 ES EL CAN tx
+	unsigned short i;
+	#define BUFFER_SIZE 4
+	i=0;
+	PCC->PCCn[PCC_FlexCAN0_INDEX] |= 1<<30;
+
+	//SE DESHABILITA EL CAN PARA CAMBIAR EL CLOCK SOURCE
+	CAN0->MCR|=(1<<31); 								//DESHABILITAMOS EL CAN PARA CAMBIAR CLK
+	CAN0->CTRL1 &=~(1<<13);							//PONEMOS EL CLKSRC (CLOCK) PARA EL SOSDIV
+	CAN0->MCR&=~(1<<31); 								//HABILITAMOS DE NUEVO EL CAN
+
+	//CONFIGURAMOS EL TIME QUANTA
+
+	while (!((CAN0->MCR & (1<<24)) >> 24))  {}			//CHECAMOS QUE ESTE EN FREEZE MODE
+	CAN0->CTRL1|=(3<<19)+(3<<16)+(6<<0)+(3<<22);	//CONFIGURAMOS PARA 500KHz BIT TIME
+		  	  	  	  	  	  	  	  	  	  	  	// TIME QUANTO =16 POR 8MHz/500KHz=16
+		  	  	  	  	  	  	  	  	  	  		// PESG1 Y 2 SON 3 PORQUE VAN DEL 25%DEL TIME QUANTA-1
+		  	  	  	  	  	  	  	  	  	  		//RWJ=3 AUN NO SE PORQUE BIEN
+		  	  	  	  	  	  	  	  	  	  		//SMP=1 NO SE PONE NADA EN EL BIT}
+	//CLEREAMOS NUESTROS BUFFERS
+	for(i=0;i<128;i++){
+		CAN0->RAMn[i]=0; 				// TENEMOS 128 BYTES PARA ESCRIBIR 4 BYTES DE MENSAGE*32 BUFFERS=128
+	}
+	 CAN0->MCR = 0x0000001F;       		// INICIALIZAMOS LOS BUFFERS
+
+	 	                   // Good practice: wait for FRZACK to clear (not in freeze mode)
+	 while ((CAN0->MCR && (1<<24)) >> 24)  {}
+	 	                   // Good practice: wait for NOTRDY to clear (module ready)
+	 while ((CAN0->MCR && (1<<27)) >> 27)  {}
+}
+
+void CAN0_transfer(unsigned long int TxData)
+{
+	CAN0->IFLAG1|=1<<4;
+	CAN0->RAMn[0*BUFFER_SIZE+2]=TxData; 			//MANDAMOS UN BIT DE INFO
+	CAN0->RAMn[0*BUFFER_SIZE+1]=(0x1FF<<18); 			//MANDAMOS EL ID QUE ACEPTA EL OTRO NODO
+	CAN0->RAMn[0*BUFFER_SIZE + 0] = (1<<22)|(12<<24)|(4<<16); //MANDAMOS EL CODIGO TX, CON UN SRR Y DLC DE 1 BYTE
+}
+
+//A = Actuator
+void PORT_init_PH_A(void)
+{
+	PORTA->PCR[11]=(1<<8);			//  GPIO-Out  PH-A
+	PORTA->PCR[17]=(1<<8);          //  GPIO-Out  PH-A
+	PTA->PDDR=(1<<11)+(1<<17); // PH-A
+
+	PORTE->PCR[3]=(1<<8);          //  GPIO-Out Polarized
+	PTE->PDDR=(1<<3); //Out Polarized
+
+	PORTD->PCR[10]=(1<<8)+(9<<16); //FinCarrera A
+	S32_NVIC->ISER[1]|=(1<<(62%32)); //Interruption PORTD
+
+	PORTD->PCR[5]=(1<<8)+(9<<16); //In-Blue
+	//PTD->PDDR=(0<<5);
+}
+
+void PORT_init_PH_B(void)
+{
+	PORTC->PCR[13]=(1<<8);			//  GPIO-Out  PH-A'
+	PORTC->PCR[12]=(1<<8);          //  GPIO-Out  PH-B
+	PTC->PDDR=(1<<13)+(1<<12); // PH-A' & PH-B
+
+	PORTD->PCR[0]=(1<<8)+(9<<16);	//FinCarrera VAbajo
+	PORTD->PCR[16]=(1<<8)+(9<<16); //FinCarrera VArriba
+}
+
+void PORT_init_Seguro(void)
+{
+	PORTD->PCR[12]=(1<<8);
+	PTD->PDDR=(1<<12);
+}
+
+void Vel_Ventana(void)
+{
+
+}
+
+void PORTD_IRQHandler(void)
+{
+	if ((PORTD->PCR[10]&(1<<24))==(1<<24))
+	{
+	    PORTD->PCR[10]|=1<<24;
+	    PTA->PCOR=(1<<11);
+	    PTD->PCOR=(1<<12);
+	}
+	if ((PORTD->PCR[5]&(1<<24))==(1<<24))
+	{
+	    PORTD->PCR[5]|=1<<24;
+	    PTA->PCOR=(1<<17);
+	}
+	if ((PORTD->PCR[0]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[0]|=1<<24;
+		PTC->PCOR=(1<<12);
+	}
+	if ((PORTD->PCR[16]&(1<<24))==(1<<24))
+	{
+		PORTD->PCR[16]|=1<<24;
+		PTC->PCOR=(1<<13);
+		//Deshabilitar anti-pinch
+	}
+}
+
+void FMT_Luces(void)
+{
+
+}
+
+void UART0_init(void)
+{
+	//Configure FIRC
+	SCG->FIRCDIV|=2<<8;
+	SCG->FIRCCSR=1;
+	SCG->FIRCCFG=0;
+
+	//Enable Port B UART0
+	PORTB->PCR[0]|=2<<8;           				// Port B0: MUX = ALT2,UART0 RX
+	PORTB->PCR[1]|=2<<8; 						// Port B1: MUX = ALT2,UART0 TX
+
+	PCC->PCCn[PCC_LPUART0_INDEX]&=~(1<<30);
+	PCC->PCCn[PCC_LPUART0_INDEX]|=(3<<24);
+	PCC->PCCn[PCC_LPUART0_INDEX]|=(1<<30); 			//UART with FIRC
+	LPUART0->BAUD=156;								//A 48MHz
+	LPUART0->CTRL|=(3<<18);					//Enable Tx, Rx & Receiver Interrupt
+	S32_NVIC->ISER[0]|=(1<<(31%32));
+	LPUART0->CTRL|=(1<<23);
+}
+
+void LPUART0_RxTx_IRQHandler(void)
+{
+	unsigned char choose;
+	choose = LPUART0->DATA;
+	if(choose=='A') //Open Door
+	{
+		PTD->PDOR=(1<<12);
+		PTA->PDOR=(1<<11);
+	}
+	if(choose=='B') //Close Door
+	{
+		PTA->PDOR=(1<<17);
+	}
+	if(choose=='C') //Open Window
+	{
+		PTC->PDOR=(1<<12);
+	}
+	if(choose=='D')
+	{
+		Vel_Ventana();
+		PTC->PDOR=(1<<13);
+		//Habilitar anti-pinch!!!
+	}
+	if(choose=='E')
+	{
+		//Modo demo
+	}
+	if(choose=='F')
+	{
+		//FMT_Luces();
+	}
+	if(choose=='G')
+	{
+		//Turn off lights
+	}
+	if(choose=='H')
+	{
+		PTE->PTOR=(1<<3); //Polarizado
+	}
+	//CAN
+	if(choose=='I')
+	{
+		unsigned long int TxData1=TxData[0];
+		CAN0_transfer(TxData1);
+	}
+	if(choose=='J')
+	{
+		unsigned long int TxData2=TxData[1];
+		CAN0_transfer(TxData2);
+	}
+	if(choose=='K')
+	{
+		unsigned long int TxData3=TxData[2];
+		CAN0_transfer(TxData3);
+	}
+	if(choose=='L')
+	{
+		unsigned long int TxData4=TxData[3];
+		CAN0_transfer(TxData4);
+	}
+}
+
+//A PARTIR DE AQUI ES EL EXAMEN
+
+void PORT_retrovisores(void)
+{
+	PORTB->PCR[16] |= 1<<8; 	//Botón que selecciona el retrovisor izquierdo/piloto
+	PORTB->PCR[17] |= 1<<8; 	//Botón que selecciona el retrovisor derecho/copiloto
+
+	PORTB->PCR[14] |= 1<<8; 	//Botón que controla el movimiento hacia adelante del motor A
+	PORTB->PCR[15] |= 1<<8; 	//Botón que controla el movimiento hacia atrás del motor A
+	PORTB->PCR[12] |= 1<<8; 	//Botón que controla el movimiento hacia adelante del motor B
+	PORTB->PCR[0] |= 1<<8; 	//Botón que controla el movimiento hacia atrás del motor B
+
+	S32_NVIC->ISER[1]|=(1<<(60%32)); //Interruption PORTB
+
+	PORTB->PCR[8] |= 1<<8; 	//LED que se prenderá al activar el retrovisor derecho/copiloto
+	PORTB->PCR[9] |= 1<<8; 	//LED que se prenderá al activar el retrovisor izquierdo
+	PTB->PDDR|=(1<<8)+(1<<9);
+	PTB->PDOR=(1<<8)+(1<<9);
+
+	PORTB->PCR[2] |= 1<<8; 	//SALIDA que controla el movimiento hacia adelante del motor A
+	PORTB->PCR[3] |= 1<<8; 	//SALIDA que controla el movimiento hacia atrás del motor A
+	PORTB->PCR[4] |= 1<<8; 	//OUTPUT que controla el movimiento hacia adelante del motor B
+	PORTB->PCR[5] |= 1<<8; 	//SALIDA que controla el movimiento hacia atrás del motor B
+	PTB->PDDR|=(1<<2)+(1<<3)+(1<<4)+(1<<5);
+}
+
+void LPTMR0_IRQHandler (void)
+{
+	LPTMR0 -> CSR|=(1<<7);
+	ADC0->SC1[0]|=9;
+}
+
+void ADC0_IRQHandler (void)
+{
+	unsigned long int mV;
+	mV=5000*(ADC0->R[0])/0xFFFF; //Tiene una resolución de 16 bits, que se lleva a un valor de entre 0 y 5000 volts.
+	//Se empezará a ajustar la corriente cuando se detecte una mayor demanda de la misma, no sé si el ADC se usa en el giroscopio o en el micro, no alcance
+
+
+}
+
+void IIC(void)
+{
+	PCC->PCCn[PCC_PORTD_INDEX]=1<<30;
+	PORTD->PCR[0]=1<<8;
+	PTD->PDOR=1<<0;
+
+	SOSC_init_8MHz();        	/* Initialize system oscilator for 8 MHz xtal */
+
+	PORT_init();				/* Init LPUART and FLEXIO  pins */
+	Flexio_Init_IIC();       	//Init FLEXIO
+	data_tx[0]=0x0000;							// REGISTRO PARA ESCRIBIR O LEER	/* 0x05: OUT_Z_MSB */
+	FlexIO_I2C_Transmit(0x68,data_tx,2);	// ADRRESS (0x50, EPROM), registro de escribir o leer, número de BYTES)
+	while((FLEXIO->SHIFTSTAT & (1<<0))==0); 		// BUFFER EMPTY
+	FLEXIO->SHIFTBUF[0]=0xFF;	  					/* Fill Tx Shifter with 0xFF to prepare start condition*/
+	//char data_rx[]={0};
+	int x;
+	x=0;
+	for(;;)
+	{
+		x++;
+		FlexIO_IIC_Receive(0x50,data_rx,1);			/* Read  the data in OUT_Z_MSB register */
+		//printf("\n\r Data: %d",data_rx[0]);
+		//printf("\n\r X: %d",x);
+		if (x>=32000){
+			PTD->PCOR=1<<0;
+		}
+	}
+}
+
+void Flexio_Init_IIC (void)
+{
+
+	  PCC->PCCn[PCC_FLEXIO_INDEX ]|=PCC_PCCn_PCS(1) 	/* FlexIO src clk: System oscillator */
+			  	  	  	  	  	  | PCC_PCCn_CGC_MASK; 	/* Enable clock for PORTE */
+	  /* Transmit shifter config */
+	  FLEXIO->SHIFTCTL[0]=FLEXIO_SHIFTCTL_SMOD(2) 		/* Shifter mode: Transmit */
+						|FLEXIO_SHIFTCTL_PINPOL(1) 		/* Pin active low */
+						|FLEXIO_SHIFTCTL_PINSEL(6) 		/* FXDIO6 as SDA*/
+						|FLEXIO_SHIFTCTL_PINCFG(1) 		/* Pin config: Open drain*/
+						|FLEXIO_SHIFTCTL_TIMPOL(0) 		/* Shift on clk Posedge */
+						|FLEXIO_SHIFTCTL_TIMSEL(1);  	/* Shifter Timer 1 is selected for SDA*/
+	  FLEXIO->SHIFTCFG[0]=FLEXIO_SHIFTCFG_SSTART(2)  	/* Set shifter start bit to logic low level */
+						 |FLEXIO_SHIFTCFG_SSTOP(3)   	/* Stop bit high */
+						 |FLEXIO_SHIFTCFG_INSRC(0);  	/* Input source is the pin */
+
+	  /* Receiver shifter config */
+	  FLEXIO->SHIFTCTL[1]=FLEXIO_SHIFTCTL_SMOD(1) 	 /* Shifter mode: Receive */
+						|FLEXIO_SHIFTCTL_PINPOL(0) 	 /* Pin active high */
+						|FLEXIO_SHIFTCTL_PINSEL(6) 	 /* FXDIO6 as SDA*/
+						|FLEXIO_SHIFTCTL_PINCFG(0) 	 /* Pin config: output disabled*/
+						|FLEXIO_SHIFTCTL_TIMPOL(1) 	 /* Shift on clk negedge */
+						|FLEXIO_SHIFTCTL_TIMSEL(1);  /* Shifter Timer 1 is selected for SDA*/
+	  FLEXIO->SHIFTCFG[1]=FLEXIO_SHIFTCFG_SSTART(0)  /* Start disable load data on enable */
+						 |FLEXIO_SHIFTCFG_SSTOP(2)   /* Stop bit low */
+						 |FLEXIO_SHIFTCFG_INSRC(0);  /* Input source is the pin */
+	/*SCL timer config */
+	  FLEXIO->TIMCFG[0]=FLEXIO_TIMCFG_TSTART(1) 	/* Start bit enabled*/
+					   |FLEXIO_TIMCFG_TSTOP(2) 		/* Stop bit enabled on timer disabled*/
+					   |FLEXIO_TIMCFG_TIMENA(2) 	/* Timer enable on trigger high*/
+					   |FLEXIO_TIMCFG_TIMDIS(2) 	/* Timer disable on timer compare*/
+					   |FLEXIO_TIMCFG_TIMRST(2)		/* Timer reset on timer pin = timer output */
+					   |FLEXIO_TIMCFG_TIMDEC(0) 	/* Timer decrement on FlexIO clk */
+					   |FLEXIO_TIMCFG_TIMOUT(1); 	/* Timer output is zero and is not affected by reset */
+	  FLEXIO->TIMCTL[0]=FLEXIO_TIMCTL_TIMOD(1)  	/* Dual 8 bit cntr baud/bit mode */
+			  	  	   |FLEXIO_TIMCTL_PINPOL(0) 	/* Pin is active high */
+					   |FLEXIO_TIMCTL_PINSEL(7) 	/* FXDIO7 for timer 0 */
+					   |FLEXIO_TIMCTL_PINCFG(1) 	/* Pin cfg: open drain */
+					   |FLEXIO_TIMCTL_TRGSRC(1) 	/* Internal trigger */
+					   |FLEXIO_TIMCTL_TRGPOL(1) 	/* Trg pol: low */
+					   |FLEXIO_TIMCTL_TRGSEL(1); 	/* Trg sel: Shifter 0*/
+
+
+
+	/*SDA timer config */
+	  FLEXIO->TIMCFG[1]=FLEXIO_TIMCFG_TSTART(1) /* Start bit enabled*/
+					   |FLEXIO_TIMCFG_TSTOP(1) 	/* Stop bit enabled on timer compare*/
+					   |FLEXIO_TIMCFG_TIMENA(1) /* Timer enable on timer 0*/
+					   |FLEXIO_TIMCFG_TIMDIS(1) /* Timer disable on timer 0*/
+					   |FLEXIO_TIMCFG_TIMRST(0)	/* Timer never reset */
+					   |FLEXIO_TIMCFG_TIMDEC(2) /* Timer decrement on pin input*/
+					   |FLEXIO_TIMCFG_TIMOUT(0); /* Timer output is one and is not affected by reset */
+
+	  FLEXIO->TIMCTL[1]=FLEXIO_TIMCTL_TIMOD(3)  	/* Single 16 bit mode */
+					   |FLEXIO_TIMCTL_PINPOL(1) 	/* Pin is active low */
+					   |FLEXIO_TIMCTL_PINSEL(7) 	/* FXDIO7 for timer 	 */
+					   |FLEXIO_TIMCTL_PINCFG(0) 	/* Pin cfg: outputdisabled */
+					   |FLEXIO_TIMCTL_TRGSRC(1) 	/* Internal trigger */
+					   |FLEXIO_TIMCTL_TRGPOL(1) 	/* Trg pol: low */
+					   |FLEXIO_TIMCTL_TRGSEL(1); 	/* Trg sel: Shifter 0*/
+
+	 FLEXIO->TIMCMP[1]=0xF;
+
+	 FLEXIO->SHIFTSDEN=FLEXIO_SHIFTSDEN_SSDE(2);  /*Enbale DMA for shifter 1 */
+	 FLEXIO->CTRL=FLEXIO_CTRL_FLEXEN_MASK; 		  /*Enable FlexIO */
+}
+
+void FlexIO_I2C_Transmit(uint8_t address, uint8_t *TXDataBuffer,uint8_t num_bytes)
+{
+
+	uint8_t  i=0;
+    FLEXIO->TIMCMP[0]=((((num_bytes+1)*9+1)*2-1)<<8);
+    FLEXIO->TIMCMP[0]|=0x25; /* Buadrate 100kbps. ((8MHz/100kbps)/2)-1=39 - 2(due to sync delays)=0x25*/
+
+    FLEXIO->SHIFTCFG[0]|=FLEXIO_SHIFTCFG_SSTOP(3); 	/* Set stop bit high */
+    FLEXIO->SHIFTCFG[1]=FLEXIO_SHIFTCFG_SSTOP(2); 	/* Set stop bit low*/
+
+    while((FLEXIO->SHIFTSTAT & (1<<0))==0); 	/* Is the buffer empty? */
+    FLEXIO->SHIFTBUFBBS[0]=(address<<1)|0;	    /* Transmit data, device address and write command*/
+	while((FLEXIO->SHIFTSTAT & (1<<1))==0); 	/* Is the rx shifter filled */
+	(void)FLEXIO->SHIFTBUFBBS[1]; 				/* Read RX shifter */
+
+	for(i=0;i<num_bytes;i++)
+	{
+
+	    while((FLEXIO->SHIFTSTAT & (1<<0))==0); 	/* Is the buffer empty? */
+	    FLEXIO->SHIFTBUFBBS[0]=TXDataBuffer++;	  	/* Transmit data, register address to read*/
+		while((FLEXIO->SHIFTSTAT & (1<<1))==0); 	/* Is the rx shifter filled */
+		(void)FLEXIO->SHIFTBUFBBS[1]; 				/* Read RX shifter */
+	}
+
+//01011001 NACK ADREES(R) ACK 01011001
+//10000101 ACK 011001001 ADRRESS 011001001
+//10011011 NACK ADRRESS(R) 10000101 ACK
+}
+
+void FlexIO_IIC_Receive(uint8_t address,uint8_t *RXDataBuffer,uint8_t num_bytes)
+{
+	uint8_t rxdata;
+	uint8_t i=0;
+
+
+    FLEXIO->TIMCMP[0]=((((num_bytes+1)*9+1)*2-1)<<8);
+    FLEXIO->TIMCMP[0]|=0x25; /* Buadrate 100kbps. ((8MHz/100kbps)/2)-1=39 - 2(due to sync delays)=0x25*/
+	FLEXIO->SHIFTCFG[0]|=FLEXIO_SHIFTCFG_SSTOP(3); 	/* Set stop bit high */
+	FLEXIO->SHIFTCFG[1]=FLEXIO_SHIFTCFG_SSTOP(2); 	/* Set stop bit low*/
+
+	while((FLEXIO->SHIFTSTAT & (1<<0))==0); 	/* Is the buffer empty? */
+	FLEXIO->SHIFTBUFBBS[0]=(address<<1)|1;	  	/* Transmit data, device address and read command*/
+	while((FLEXIO->SHIFTSTAT & (1<<0))==0); 	/* Is the buffer empty? */
+    FLEXIO->SHIFTBUFBBS[0]=0xFF;				/* 0xFF in the transmit shifter to tristate the output */
+    while((FLEXIO->SHIFTSTAT & (1<<1))==0); 	/* Is the rx shifter filled */
+	(void)FLEXIO->SHIFTBUFBBS[1]; 				/* Drain RX shifter */
+
+	for(i=0;i<num_bytes;i++)
+	{
+	  	while((FLEXIO->SHIFTSTAT & (1<<1))==0); 	/*Is the rx shifter filled */
+	  	rxdata=FLEXIO->SHIFTBUFBIS[1]; 				/* Read data */
+	    *RXDataBuffer++ = rxdata;
+	}
+}
+
+void PORT_init_FLEXIO (void)
+{
+	PCC->PCCn[PCC_PORTE_INDEX ]|=PCC_PCCn_CGC_MASK; /* Enable clock for PORTE */
+	PORTE->PCR[4]|=PORT_PCR_MUX(6) 	/* Port E4: MUX = ALT6, FXIO */ //SDA
+				|PORT_PCR_PE_MASK	/* Pull resistor: enable */
+				|PORT_PCR_PS(1); 	/*Select:Pull up */
+	PORTE->PCR[5]|=PORT_PCR_MUX(6) 	/* Port E5: MUX = ALT7, FXIO */	//SCL
+				|PORT_PCR_PE_MASK	/* Pull resistor: enable */
+				|PORT_PCR_PS(1);  	/*Select:Pull up */
+
+	PCC->PCCn[PCC_PORTC_INDEX ]|=PCC_PCCn_CGC_MASK; /* Enable clock for PORTC */
+	PORTC->PCR[6]|=PORT_PCR_MUX(2);  /* Port C6:  MUX = ALT2,UART2 TX */
+	PORTC->PCR[7]|=PORT_PCR_MUX(2);  /* Port C7:  MUX = ALT2,UART2 RX */
+}
+
+//Activamos ADC que estará midiendo la corriente en el retrovisor del piloto
+void ADC0_init(void)
+{
+	SCG->FIRCCSR=1;
+	SCG->FIRCDIV=(2<<8);
+	SCG->FIRCCFG=0;
+
+	PCC->PCCn[PCC_ADC0_INDEX] &= ~(1<<30);
+	PCC->PCCn[PCC_ADC0_INDEX] |= (3<<24);
+	PCC->PCCn[PCC_ADC0_INDEX] |= (1<<30);
+
+	ADC0->CFG1 = (1<<2);
+	ADC0->SC1[0]=(1<<6);
+
+	S32_NVIC->ISER[1]|=(1<<(39%32));
+	S32_NVIC->ISER[1]|=(1<<(58%32));
+
+	PCC->PCCn[PCC_LPTMR0_INDEX]=(1<<30);
+	LPTMR0 -> PSR=(1<<2) + 1;
+	LPTMR0 -> CMR=499;
+	LPTMR0 -> CSR=1;
+}
+
+void PORTB_IRQHandler(void)
+{
+	if ((PORTB->PCR[17]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[17]|=1<<24;
+		PTB->PDOR|=(1<<8);
+		PTB->PDOR|=(0<<9);
+	}
+	if ((PORTB->PCR[16]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[16]|=1<<24;
+		PTB->PDOR|=(1<<9);
+		PTB->PDOR|=(0<<8);
+	}
+	//LOS 2 IF ANTERIORES HACEN QUE CUANDO EL USUARIO SELECCIONE UNO DE LOS RETROVISORES, SE PRENDA UN LED INDICÁNDOLE CUÁL PODRÁ UTILIZAR A CONTINUACIÓN
+	//A continuación se presentan los 4 botones que controlarán los sensores, recordando que en este codigo sólo se puso la función que sería necesaría enviar
+	//por CAN, omitiendo la parte del código de Rx.
+	if ((PORTB->PCR[0]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[0]|=1<<24;
+		if((PORTB->PCR[16]&(1<<24))==(1<<24))
+		{
+			PTB->PDOR|=(1<<5);
+			LPTMR0 -> CSR=(1<<6);
+		}
+		if((PORTB->PCR[17]&(1<<24))==(1<<24))
+		{
+			unsigned long int TxxData=TxData1[0];
+			CAN0_transfer(TxxData);
+		}
+	}
+	if ((PORTB->PCR[12]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[12]|=1<<24;
+		if((PORTB->PCR[16]&(1<<24))==(1<<24))
+		{
+			PTB->PDOR|=(1<<4);
+			LPTMR0 -> CSR=(1<<6);
+		}
+		if((PORTB->PCR[17]&(1<<24))==(1<<24))
+		{
+			unsigned long int TxxData1=TxData1[1];
+			CAN0_transfer(TxxData1);
+		}
+	}
+	if ((PORTB->PCR[14]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[14]|=1<<24;
+		if((PORTB->PCR[16]&(1<<24))==(1<<24))
+		{
+			PTB->PDOR|=(1<<2);
+			LPTMR0 -> CSR=(1<<6);
+		}
+		if((PORTB->PCR[17]&(1<<24))==(1<<24))
+		{
+			unsigned long int TxxData2=TxData1[2];
+			CAN0_transfer(TxxData2);
+		}
+	}
+	if ((PORTB->PCR[15]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[15]|=1<<24;
+		if((PORTB->PCR[16]&(1<<24))==(1<<24))
+		{
+			PTB->PDOR|=(1<<3);
+			LPTMR0 -> CSR=(1<<6);
+		}
+		if((PORTB->PCR[17]&(1<<24))==(1<<24))
+		{
+			unsigned long int TxxData3=TxData1[3];
+			CAN0_transfer(TxxData3);		}
+	}
+}
+
+int main(void)
+{
+	CLOCKS();
+	PORT_init();
+	CAN0_init();
+	PORT_init_PH_A();
+	PORT_init_PH_B();
+	PORT_init_Seguro();
+	UART0_init();
+	IIC();
+	for(;;)
+	{
+		//Apago los motores del piloto (con una mala práctica) para cuando deje de presionar el botón, el retrovisor se detengan
+		PTB->PDOR|=(0<<0);
+		PTB->PDOR|=(0<<4);
+		PTB->PDOR|=(0<<2);
+		PTB->PDOR|=(0<<3);
+	}
+	return 0;
+}

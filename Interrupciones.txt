@@ -1,0 +1,6 @@
+Receta de interrupciones
+1. Bandera
+2. HAbilitador de interrupción del módulo
+3. NVIC
+4. ISER
+

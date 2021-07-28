@@ -1,0 +1,428 @@
+#include "S32K144.h" /* include peripheral declarations S32K144 */
+unsigned long int RxDATA;
+unsigned char TxUData[]={"Opening door\n\r"};
+unsigned char TxUData1[]={"Closing door\n\r"};
+unsigned char TxUData2[]={"Opening window\n\r"};
+unsigned char TxUData3[]={"Closing window\n\r"};
+
+int i=0;
+int j=0;
+int count=0;
+int global=0;
+int color=0;
+
+char m[]={0,0,1};
+char n[]={0,1,0};
+char o[]={0,1,1};
+char p[]={1,0,0};
+char q[]={1,0,1};
+char r[]={1,1,0};
+
+void CLOCKS(void)
+{
+	//CLOCK CONFIG
+	SCG->SOSCDIV=0x00000101;   			//SOSCDIV1 & SOSCDIV2 =1: divide by 1
+	SCG->SOSCCFG=0x00000024;  			//Range=2: Medium freq (SOSC betw 1MHz-8MHz)
+		                             	//HGO=0:   Config xtal osc for low power
+										//EREFS=1: Input is external XTAL
+	while(SCG->SOSCCSR & (1<<23)); /* Ensure SOSCCSR unlocked */
+	SCG->SOSCCSR=0x00000001;
+	while(!(SCG->SOSCCSR & (1<<24)));
+}
+
+void CAN0_init(void)
+{
+	PCC->PCCn[PCC_PORTE_INDEX] |= 1<<30; 	// Enable clock for PORTE
+	PORTE->PCR[4] |= (5<<8); 				// Port E4: MUX = ALT5, CAN0_RX
+	PORTE->PCR[5] |= (5<<8); 				//PORT E5 MUX 5 ES EL CAN tx
+	unsigned short i;
+	#define BUFFER_SIZE 4
+	i=0;
+	PCC->PCCn[PCC_FlexCAN0_INDEX] |= 1<<30;
+
+	//SE DESHABILITA EL CAN PARA CAMBIAR EL CLOCK SOURCE
+	CAN0->MCR|=(1<<31); 								//DESHABILITAMOS EL CAN PARA CAMBIAR CLK
+	CAN0->CTRL1 &=~(1<<13);							//PONEMOS EL CLKSRC (CLOCK) PARA EL SOSDIV
+	CAN0->MCR&=~(1<<31); 								//HABILITAMOS DE NUEVO EL CAN
+
+	//CONFIGURAMOS EL TIME QUANTA
+
+	while (!((CAN0->MCR & (1<<24)) >> 24))  {}			//CHECAMOS QUE ESTE EN FREEZE MODE
+	CAN0->CTRL1|=(3<<19)+(3<<16)+(6<<0)+(3<<22);	//CONFIGURAMOS PARA 500KHz BIT TIME
+		  	  	  	  	  	  	  	  	  	  	  	// TIME QUANTO =16 POR 8MHz/500KHz=16
+		  	  	  	  	  	  	  	  	  	  		// PESG1 Y 2 SON 3 PORQUE VAN DEL 25%DEL TIME QUANTA-1
+		  	  	  	  	  	  	  	  	  	  		//RWJ=3 AUN NO SE PORQUE BIEN
+		  	  	  	  	  	  	  	  	  	  		//SMP=1 NO SE PONE NADA EN EL BIT}
+
+	//CLEREAMOS NUESTROS BUFFERS
+	for(i=0;i<128;i++){
+		CAN0->RAMn[i]=0; 				// TENEMOS 128 BYTES PARA ESCRIBIR 4 BYTES DE MENSAGE*32 BUFFERS=128
+	}
+	for(i=0;i<16;i++){ 					//SOLO SE VAN A CHECAR 16 BUFFERS PRENDES LOS FILTROS
+		CAN0->RXIMR[i]=0xFFFFFFFF;		//HABILITAS CHECAR EL ID BIT POR BIT
+	}									// ESTAS DICIENDO SI EN DETERMINADO BIT DEL DETERMINADO BUFFER CHECAS TODOS LOS BITS DEL ID
+										// DE TENER UN ID CON DONT CARES LO DEJO EN 0 ESE BIT
+
+	//SOLO CHECAN QUETODOS LOS BITS DEL 28 A 0 TENGAN ALGO O ESTEN HABILITADOS EN MEMORIA
+	CAN0->RXMGMASK = 0x1FFFFFFF;        //PARA CHECAR TODOS LOS BITS DEL ID
+		  	  	  	  	  	  	  	  	//RTR ES EL REMOTE TRANSMISSION REQUEST, IDE ES LA LONGITUD DE BITS (HASTA 29)
+
+	 CAN0->RAMn[4*BUFFER_SIZE]=0x04000000;			// Msg Buf 4, word 0: Enable for reception
+		                                			// EDL,BRS,ESI=0: CANFD not used
+		                                			// CODE=4: MB set to RX inactive (0b0100=EMPTY)
+		                                			// IDE=0: Standard ID
+		                                			// SRR, RTR, TIME STAMP = 0: not applicable
+	 CAN0->RAMn[4*BUFFER_SIZE+1]=(0x1FF<<18);		//MSG BUFF 4, WORD 1// MSG ID DE 11 BITS=0X7FF;EL ID DESPLAZADO 18 VECES
+
+	 CAN0->MCR = 0x0000001F;       // INICIALIZAMOS LOS BUFFERS
+	 while ((CAN0->MCR && (1<<24)) >> 24)  {}
+	                 /* Good practice: wait for FRZACK to clear (not in freeze mode) */
+	 while ((CAN0->MCR && (1<<27)) >> 27)  {}
+	                 /* Good practice: wait for NOTRDY to clear (module ready)  */
+}
+
+void CAN0_receive (void)
+{
+	unsigned char n;
+	CAN0->IFLAG1|=1<<4;
+	RxDATA=(CAN0->RAMn[4*BUFFER_SIZE+2]);
+	if(RxDATA==0x00000001)
+	{
+		for(n=0;n<15;n++){
+			do{}while ((LPUART1->STAT&(1<<23))==0);
+			LPUART1->DATA=TxUData[n];
+		}
+	}
+	if(RxDATA==0x00000002)
+	{
+		for(n=0;n<15;n++){
+			do{}while ((LPUART1->STAT&(1<<23))==0);
+			LPUART1->DATA=TxUData1[n];
+		}
+	}
+	if(RxDATA==0x00000003)
+	{
+		for(n=0;n<15;n++){
+			do{}while ((LPUART1->STAT&(1<<23))==0);
+			LPUART1->DATA=TxUData2[n];
+		}
+	}
+	if(RxDATA==0x00000004)
+	{
+		for(n=0;n<15;n++){
+			do{}while ((LPUART1->STAT&(1<<23))==0);
+			LPUART1->DATA=TxUData3[n];
+		}
+	}
+}
+
+void TIMERS(void)
+{
+	SCG->FIRCDIV|=(1<<1)+(2<<8);
+	SCG->FIRCCSR=1;
+	SCG->FIRCCFG=0;
+}
+
+void BOTONES(void)
+{
+	PCC->PCCn[PCC_PORTB_INDEX]|=1<<30;
+	PORTB->PCR[12]=(1<<8)+(9<<16);
+	PORTB->PCR[13]=(1<<8)+(9<<16);
+	PORTB->PCR[14]=(1<<8)+(9<<16);
+	PORTB->PCR[1]=(1<<8)+(9<<16);
+	PORTB->PCR[16]=(1<<8)+(9<<16);
+	PORTB->PCR[17]=(1<<8)+(9<<16);
+	S32_NVIC->ISER[1]|=(1<<(60%32)); //HABILITAR INTERRUPCIONES DEL PUERTO B
+}
+
+void LED_INIT(void)
+{
+	PCC->PCCn[PCC_FTM0_INDEX]&=~(1<<30); //APAGAMOS PARA PONER EL FIRCDIV2
+	PCC->PCCn[PCC_FTM0_INDEX]|=3<<24;
+	PCC->PCCn[PCC_FTM0_INDEX]|=1<<30;
+
+	FTM0->CONTROLS[3].CnSC = 0X00000028; /* FTM0 ch0: Output Compare, toggle output on match */
+	FTM0->CONTROLS[3].CnV=0;     		 /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/		  //FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle
+
+	//LEDS FTM
+	PCC->PCCn[PCC_PORTD_INDEX]|=(1<<30);
+	PORTD->PCR[1]|=(2<<8)+(10<<16);
+	S32_NVIC->ISER[1]|=(1<<(62%32));		//INTERRUPCION PUERTO D
+}
+
+void reset(void){
+	FTM0->MODE=1<<2; //QUITAMOS LA PROTECCION DE WRITE
+	FTM0->SC=(1<<19);
+	FTM0->CONTROLS[3].CnSC = 0X00000028;
+	FTM0->CONTROLS[3].CnV=0;    /* FTM0FTM0->CONTROLS[3].CnSC = 0X00000028; ch 0 Compare Value= 6250  clks, 100ms toggle*/
+	FTM0->SC|=3<<3;
+}
+
+void prender(void){
+	FTM0->MODE|=1<<2; //QUITAMOS LA PROTECCION DE WRITE
+	FTM0->SC=(1<<19);
+	FTM0-> MOD= 30-1;//cuenta 10 tics
+	FTM0->CONTROLS[3].CnV=23;    /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/
+	FTM0->SC|=3<<3;
+}
+
+void apagar(void){
+	FTM0->MODE=1<<2; //QUITAMOS LA PROTECCION DE WRITE
+	FTM0->SC=(1<<19);
+	FTM0->CONTROLS[3].CnSC = 0X00000028;
+	FTM0->CONTROLS[3].CnV=6;     //Amarillo    /* FTM0 ch 0 Compare Value= 6250  clks, 100ms toggle*/
+	FTM0->SC|=3<<3;
+}
+
+void PORTD_IRQHandler(void){
+	count++;
+	PORTD->PCR[1]|=1<<24;
+}
+
+void delay (void){
+	for(i=0;i<100000;i++){}
+}
+
+void LIGHT(void)
+{
+	count=0;
+	reset();
+	delay();
+	prender();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(m[j]==0)
+			{
+				apagar();
+			}
+			else
+			{
+			prender();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	reset();
+}
+
+void LIGHT1(void)
+{
+	count=0;
+	reset();
+	delay();
+	prender();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(n[j]==0)
+			{
+				apagar();
+			}
+			else
+			{
+			prender();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	reset();
+}
+
+void LIGHT2(void)
+{
+	count=0;
+	reset();
+	delay();
+	prender();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(o[j]==0)
+			{
+				apagar();
+			}
+			else
+			{
+			prender();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	reset();
+}
+
+void LIGHT3(void)
+{
+	count=0;
+	reset();
+	delay();
+	prender();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(p[j]==0)
+			{
+				apagar();
+			}
+			else
+			{
+			prender();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	reset();
+}
+
+void LIGHT4(void)
+{
+	count=0;
+	reset();
+	delay();
+	prender();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(q[j]==0)
+			{
+				apagar();
+			}
+			else
+			{
+			prender();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	reset();
+}
+
+void LIGHT5(void)
+{
+	count=0;
+	reset();
+	delay();
+	prender();
+	for (global=0;global<50;global++)
+	{
+		for(j=0;j<3;j++)
+		{
+			if(r[j]==0)
+			{
+				apagar();
+			}
+			else
+			{
+			prender();
+			}
+			do{}while(count!=8);
+			count=0;
+		}
+	}
+	reset();
+}
+
+void UART1_init(void)
+{
+	PCC->PCCn[PCC_PORTC_INDEX ]|=1<<30;			// Enable clock for PORTC
+	PORTC->PCR[6]|=2<<8;           				// Port C6: MUX = ALT2,UART1 RX
+	PORTC->PCR[7]|=2<<8; 						// Port C7: MUX = ALT2,UART1 TX
+
+	PCC->PCCn[PCC_LPUART1_INDEX]&=~(1<<30);
+	PCC->PCCn[PCC_LPUART1_INDEX]|=(3<<24);
+	PCC->PCCn[PCC_LPUART1_INDEX]|=(1<<30); 			//UART with FIRC
+	LPUART1->BAUD=156;								//A 48MHz
+	LPUART1->CTRL|=(3<<18);					//Enable Rx & Receiver Interrupt
+}
+
+void  PORTB_IRQHandler(void)
+{
+	if ((PORTB->PCR[12]&(1<<24))==(1<<24))
+	{
+		 PORTB->PCR[12]|=1<<24;
+		 color=1;
+	}
+	else if ((PORTB->PCR[13]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[13]|=1<<24;
+		color=2;
+	}
+	else if ((PORTB->PCR[14]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[14]|=1<<24;
+		color=3;
+	}
+	else if ((PORTB->PCR[1]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[1]|=1<<24;
+		color=4;
+	}
+	else if ((PORTB->PCR[16]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[16]|=1<<24;
+		color=5;
+	}
+	else if ((PORTB->PCR[17]&(1<<24))==(1<<24))
+	{
+		PORTB->PCR[17]|=1<<24;
+		color=6;
+	}
+}
+
+int main(void)
+{
+	CLOCKS();
+	TIMERS();
+	BOTONES();
+	LED_INIT();
+	CAN0_init();
+	UART1_init();
+	for(;;)
+	{
+		if (((CAN0->IFLAG1 >> 4) & 1)==1)
+		{
+			CAN0_receive();
+		}
+		if(color==1)
+		{
+			LIGHT();
+			color=0;
+		}
+		if(color==2)
+		{
+			LIGHT1();
+			color=0;
+		}
+		if(color==3)
+		{
+			LIGHT2();
+			color=0;
+		}
+		if(color==4)
+		{
+			LIGHT3();
+			color=0;
+		}
+		if(color==5)
+		{
+			LIGHT4();
+			color=0;
+		}
+		if(color==6)
+		{
+			LIGHT5();
+			color=0;
+		}
+	}
+}

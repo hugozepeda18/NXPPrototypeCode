@@ -1,0 +1,2 @@
+void(*PORTD_init_ptr)(void) = &PORTD_init;
+(*PORTD_init_ptr)();
